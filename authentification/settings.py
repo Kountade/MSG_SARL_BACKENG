@@ -25,7 +25,8 @@ SECRET_KEY = "django-insecure--4%4po76sw&gog^kmdp#!tzdozf52uid#u!_m!^kt(+l0f+=g1
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["msg-sarl-backeng.onrender.com",
+                 "localhost", "127.0.0.1"]
 
 
 # Application definition
@@ -57,9 +58,15 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
 ]
 
+
+CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173"
+    "http://192.168.0.161:3000",
+    "https://msg-sarl-backeng.onrender.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
+
 AUTH_USER_MODEL = 'users.CustomUser'
 
 
