@@ -411,7 +411,20 @@ class Vente(models.Model):
 
         # Prélever le stock pour chaque ligne de vente
         for ligne in self.lignes_vente.all():
+            # Prélever le stock de l'entrepôt
             ligne.prelever_stock_entrepot()
+
+            # CRÉER LE MOUVEMENT DE STOCK POUR LA SORTIE
+            MouvementStock.objects.create(
+                produit=ligne.produit,
+                type_mouvement='sortie',
+                quantite=ligne.quantite,
+                prix_unitaire=ligne.prix_unitaire,
+                motif=f"Vente {self.numero_vente}" +
+                (f" - Client: {self.client.nom}" if self.client else ""),
+                entrepot=ligne.entrepot,
+                created_by=self.created_by
+            )
 
         self.save()
 
@@ -424,9 +437,10 @@ class Vente(models.Model):
             details={
                 'action': 'confirmation',
                 'numero_vente': self.numero_vente,
-                'client': self.client.nom if self.client else 'Aucun'
+                'client': self.client.nom if self.client else 'Aucun',
+                'mouvements_crees': self.lignes_vente.count()
             }
-        )    # ... (autres méthodes existantes)
+        )
 
     def save(self, *args, **kwargs):
         # Calculer le montant total si la vente existe déjà
