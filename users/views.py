@@ -211,6 +211,7 @@ class ProduitViewSet(viewsets.ModelViewSet):
         return context
 
     def get_queryset(self):
+        # LES VENDEURS VOIENT TOUS LES PRODUITS POUR POUVOIR VENDRE
         queryset = Produit.objects.all()
 
         # Filtre par catégorie
@@ -241,11 +242,8 @@ class ClientViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminOrVendeur]
 
     def get_queryset(self):
-        user = self.request.user
-        if user.role == 'admin':
-            return Client.objects.all()
-        else:
-            return Client.objects.filter(created_by=user)
+        # LES VENDEURS VOIENT TOUS LES CLIENTS POUR POUVOIR VENDRE
+        return Client.objects.all()
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -277,10 +275,11 @@ class MouvementStockViewSet(viewsets.ModelViewSet):
 # Nouvelles vues pour les entrepôts
 class EntrepotViewSet(viewsets.ModelViewSet):
     serializer_class = EntrepotSerializer
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrVendeur]  # MODIFIÉ: Changé à IsAdminOrVendeur
 
     def get_queryset(self):
-        return Entrepot.objects.all()
+        # LES VENDEURS VOIENT TOUS LES ENTREPÔTS ACTIFS
+        return Entrepot.objects.filter(actif=True)
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -397,10 +396,8 @@ class StockDisponibleViewSet(viewsets.ViewSet):
 
 
 # views.py - TransfertEntrepotViewSet
-
-
 class TransfertEntrepotViewSet(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdmin]  # Seuls les admins peuvent faire des transferts
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -418,7 +415,7 @@ class TransfertEntrepotViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        serializer.save()
+        serializer.save(created_by=self.request.user)
 
     @action(detail=True, methods=['post'])
     def confirmer(self, request, pk=None):
@@ -497,291 +494,6 @@ class TransfertEntrepotViewSet(viewsets.ModelViewSet):
                 {"detail": "Transfert non trouvé."},
                 status=status.HTTP_404_NOT_FOUND
             )
-# views.py - Modifiez VenteViewSet et ajoutez ces vues
-
-
-class VenteViewSet(viewsets.ModelViewSet):
-    serializer_class = VenteDetailSerializer  # Utiliser le serializer détaillé
-    permission_classes = [IsAdminOrVendeur]
-
-    def get_queryset(self):
-        user = self.request.user
-        queryset = Vente.objects.all().order_by('-created_at')
-
-        # Filtres supplémentaires
-        statut_paiement = self.request.query_params.get('statut_paiement')
-        if statut_paiement:
-            queryset = queryset.filter(statut_paiement=statut_paiement)
-
-        client_id = self.request.query_params.get('client')
-        if client_id:
-            queryset = queryset.filter(client_id=client_id)
-
-        en_retard = self.request.query_params.get('en_retard')
-        if en_retard:
-            queryset = queryset.filter(
-                date_echeance__lt=timezone.now().date(),
-                statut_paiement__in=['non_paye', 'partiel']
-            )
-
-        if user.role != 'admin':
-            queryset = queryset.filter(created_by=user)
-
-        return queryset
-
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return VenteCreateSerializer
-        return VenteDetailSerializer
-
-    @action(detail=True, methods=['post'])
-    def enregistrer_paiement(self, request, pk=None):
-        """Enregistrer un paiement pour une vente"""
-        try:
-            vente = self.get_object()
-
-            serializer = EnregistrerPaiementSerializer(
-                data=request.data,
-                context={'vente': vente}
-            )
-
-            if serializer.is_valid():
-                data = serializer.validated_data
-
-                # Créer le paiement
-                paiement = Paiement.objects.create(
-                    vente=vente,
-                    montant=data['montant'],
-                    mode_paiement=data['mode_paiement'],
-                    reference=data.get('reference', ''),
-                    notes=data.get('notes', ''),
-                    created_by=request.user
-                )
-
-                # Mettre à jour le montant payé de la vente
-                vente.montant_paye += data['montant']
-
-                # Si paiement complet, mettre à jour le mode de paiement
-                if vente.montant_paye >= vente.montant_total and not vente.mode_paiement:
-                    vente.mode_paiement = data['mode_paiement']
-
-                vente.save()
-
-                # Log d'audit
-                AuditLog.objects.create(
-                    user=request.user,
-                    action='vente',
-                    modele='Paiement',
-                    objet_id=paiement.id,
-                    details={
-                        'vente': vente.numero_vente,
-                        'montant': str(data['montant']),
-                        'mode_paiement': data['mode_paiement'],
-                        'nouveau_statut': vente.statut_paiement
-                    }
-                )
-
-                return Response({
-                    'message': 'Paiement enregistré avec succès',
-                    'paiement': PaiementSerializer(paiement).data,
-                    'vente': VenteDetailSerializer(vente).data
-                })
-
-            return Response(serializer.errors, status=400)
-
-        except Vente.DoesNotExist:
-            return Response({'error': 'Vente non trouvée'}, status=404)
-
-    @action(detail=True, methods=['post'])
-    def generer_facture(self, request, pk=None):
-        """Générer une facture pour une vente"""
-        try:
-            vente = self.get_object()
-
-            # Vérifier si une facture existe déjà
-            if hasattr(vente, 'facture'):
-                return Response({'error': 'Une facture existe déjà pour cette vente'}, status=400)
-
-            # Générer numéro de facture
-            today = datetime.now().strftime('%Y%m%d')
-            last_facture_today = Facture.objects.filter(
-                numero_facture__startswith=f'F{today}'
-            ).count()
-            numero_facture = f'F{today}{last_facture_today + 1:04d}'
-
-            # Créer la facture (sans PDF pour l'instant)
-            facture = Facture.objects.create(
-                vente=vente,
-                numero_facture=numero_facture,
-                montant_ttc=vente.montant_total,
-                montant_ht=vente.montant_total / 1.2,  # Exemple avec 20% TVA
-                tva=20.0
-            )
-
-            return Response({
-                'message': 'Facture générée avec succès',
-                'facture': FactureSerializer(facture).data
-            })
-
-        except Vente.DoesNotExist:
-            return Response({'error': 'Vente non trouvée'}, status=404)
-
-    @action(detail=False, methods=['get'])
-    def ventes_impayees(self, request):
-        """Liste des ventes impayées ou partiellement payées"""
-        queryset = self.get_queryset().filter(
-            statut='confirmee',
-            statut_paiement__in=['non_paye', 'partiel']
-        ).order_by('date_echeance')
-
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = VenteDetailSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = VenteDetailSerializer(queryset, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def ventes_en_retard(self, request):
-        """Liste des ventes en retard de paiement"""
-        queryset = self.get_queryset().filter(
-            statut='confirmee',
-            statut_paiement__in=['non_paye', 'partiel'],
-            date_echeance__lt=timezone.now().date()
-        ).order_by('date_echeance')
-
-        # Calculer les jours de retard pour chaque vente
-        result = []
-        for vente in queryset:
-            data = VenteDetailSerializer(vente).data
-            data['jours_retard'] = vente.jours_retard()
-            result.append(data)
-
-        return Response(result)
-
-
-class HistoriqueClientViewSet(viewsets.ViewSet):
-    """API pour l'historique des factures d'un client"""
-    permission_classes = [IsAdminOrVendeur]
-
-    def list(self, request):
-        client_id = request.query_params.get('client_id')
-
-        if not client_id:
-            return Response({'error': 'client_id est requis'}, status=400)
-
-        try:
-            client = Client.objects.get(id=client_id)
-        except Client.DoesNotExist:
-            return Response({'error': 'Client non trouvé'}, status=404)
-
-        # Récupérer toutes les ventes du client
-        ventes = Vente.objects.filter(
-            client=client,
-            statut='confirmee'
-        ).order_by('-created_at')
-
-        # Calculer les statistiques
-        total_achats = ventes.aggregate(Sum('montant_total'))[
-            'montant_total__sum'] or 0
-        total_paye = ventes.aggregate(Sum('montant_paye'))[
-            'montant_paye__sum'] or 0
-        ventes_en_retard = ventes.filter(
-            date_echeance__lt=timezone.now().date(),
-            statut_paiement__in=['non_paye', 'partiel']
-        ).count()
-
-        dernier_achat = ventes.first().created_at if ventes.exists() else None
-
-        # Pagination
-        page = self.paginate_queryset(ventes)
-        if page is not None:
-            ventes_serializer = VenteDetailSerializer(page, many=True)
-
-            return self.get_paginated_response({
-                'client': ClientSerializer(client).data,
-                'statistiques': {
-                    'total_achats': total_achats,
-                    'total_paye': total_paye,
-                    'solde_restant': total_achats - total_paye,
-                    'nombre_ventes': ventes.count(),
-                    'ventes_en_retard': ventes_en_retard,
-                    'dernier_achat': dernier_achat
-                },
-                'ventes': ventes_serializer.data
-            })
-
-        # Si pas de pagination
-        ventes_serializer = VenteDetailSerializer(ventes, many=True)
-
-        return Response({
-            'client': ClientSerializer(client).data,
-            'statistiques': {
-                'total_achats': total_achats,
-                'total_paye': total_paye,
-                'solde_restant': total_achats - total_paye,
-                'nombre_ventes': ventes.count(),
-                'ventes_en_retard': ventes_en_retard,
-                'dernier_achat': dernier_achat
-            },
-            'ventes': ventes_serializer.data
-        })
-
-
-class RapportPaiementsViewSet(viewsets.ViewSet):
-    """Rapports sur les paiements"""
-    permission_classes = [IsAdminOrVendeur]
-
-    @action(detail=False, methods=['get'])
-    def recouvrements(self, request):
-        """Rapport de recouvrement"""
-        date_debut = request.query_params.get('date_debut')
-        date_fin = request.query_params.get('date_fin')
-
-        paiements = Paiement.objects.all()
-
-        if date_debut and date_fin:
-            paiements = paiements.filter(
-                date_paiement__date__gte=date_debut,
-                date_paiement__date__lte=date_fin
-            )
-
-        # Regrouper par mode de paiement
-        par_mode = paiements.values('mode_paiement').annotate(
-            total=Sum('montant'),
-            count=Count('id')
-        )
-
-        # Regrouper par jour
-        par_jour = paiements.values('date_paiement__date').annotate(
-            total=Sum('montant'),
-            count=Count('id')
-        ).order_by('date_paiement__date')
-
-        # Montants impayés
-        ventes_impayees = Vente.objects.filter(
-            statut='confirmee',
-            statut_paiement__in=['non_paye', 'partiel']
-        )
-
-        total_impaye = ventes_impayees.aggregate(
-            total=Sum('montant_restant')
-        )['total'] or 0
-
-        return Response({
-            'total_paiements': paiements.aggregate(Sum('montant'))['montant__sum'] or 0,
-            'nombre_paiements': paiements.count(),
-            'par_mode_paiement': list(par_mode),
-            'par_jour': list(par_jour),
-            'impayes': {
-                'total': total_impaye,
-                'nombre_ventes': ventes_impayees.count(),
-                'ventes': VenteDetailSerializer(ventes_impayees[:20], many=True).data
-            }
-        })
-
-# views.py - Modifiez VenteViewSet
 
 
 class VenteViewSet(viewsets.ModelViewSet):
@@ -808,6 +520,7 @@ class VenteViewSet(viewsets.ModelViewSet):
                 statut_paiement__in=['non_paye', 'partiel']
             )
 
+        # Les vendeurs ne voient que leurs propres ventes
         if user.role != 'admin':
             queryset = queryset.filter(created_by=user)
 
@@ -1046,6 +759,127 @@ class VenteViewSet(viewsets.ModelViewSet):
         return Response(result)
 
 
+class HistoriqueClientViewSet(viewsets.ViewSet):
+    """API pour l'historique des factures d'un client"""
+    permission_classes = [IsAdminOrVendeur]
+
+    def list(self, request):
+        client_id = request.query_params.get('client_id')
+
+        if not client_id:
+            return Response({'error': 'client_id est requis'}, status=400)
+
+        try:
+            client = Client.objects.get(id=client_id)
+        except Client.DoesNotExist:
+            return Response({'error': 'Client non trouvé'}, status=404)
+
+        # Récupérer toutes les ventes du client
+        ventes = Vente.objects.filter(
+            client=client,
+            statut='confirmee'
+        ).order_by('-created_at')
+
+        # Calculer les statistiques
+        total_achats = ventes.aggregate(Sum('montant_total'))[
+            'montant_total__sum'] or 0
+        total_paye = ventes.aggregate(Sum('montant_paye'))[
+            'montant_paye__sum'] or 0
+        ventes_en_retard = ventes.filter(
+            date_echeance__lt=timezone.now().date(),
+            statut_paiement__in=['non_paye', 'partiel']
+        ).count()
+
+        dernier_achat = ventes.first().created_at if ventes.exists() else None
+
+        # Pagination
+        page = self.paginate_queryset(ventes)
+        if page is not None:
+            ventes_serializer = VenteDetailSerializer(page, many=True)
+
+            return self.get_paginated_response({
+                'client': ClientSerializer(client).data,
+                'statistiques': {
+                    'total_achats': total_achats,
+                    'total_paye': total_paye,
+                    'solde_restant': total_achats - total_paye,
+                    'nombre_ventes': ventes.count(),
+                    'ventes_en_retard': ventes_en_retard,
+                    'dernier_achat': dernier_achat
+                },
+                'ventes': ventes_serializer.data
+            })
+
+        # Si pas de pagination
+        ventes_serializer = VenteDetailSerializer(ventes, many=True)
+
+        return Response({
+            'client': ClientSerializer(client).data,
+            'statistiques': {
+                'total_achats': total_achats,
+                'total_paye': total_paye,
+                'solde_restant': total_achats - total_paye,
+                'nombre_ventes': ventes.count(),
+                'ventes_en_retard': ventes_en_retard,
+                'dernier_achat': dernier_achat
+            },
+            'ventes': ventes_serializer.data
+        })
+
+
+class RapportPaiementsViewSet(viewsets.ViewSet):
+    """Rapports sur les paiements"""
+    permission_classes = [IsAdminOrVendeur]
+
+    @action(detail=False, methods=['get'])
+    def recouvrements(self, request):
+        """Rapport de recouvrement"""
+        date_debut = request.query_params.get('date_debut')
+        date_fin = request.query_params.get('date_fin')
+
+        paiements = Paiement.objects.all()
+
+        if date_debut and date_fin:
+            paiements = paiements.filter(
+                date_paiement__date__gte=date_debut,
+                date_paiement__date__lte=date_fin
+            )
+
+        # Regrouper par mode de paiement
+        par_mode = paiements.values('mode_paiement').annotate(
+            total=Sum('montant'),
+            count=Count('id')
+        )
+
+        # Regrouper par jour
+        par_jour = paiements.values('date_paiement__date').annotate(
+            total=Sum('montant'),
+            count=Count('id')
+        ).order_by('date_paiement__date')
+
+        # Montants impayés
+        ventes_impayees = Vente.objects.filter(
+            statut='confirmee',
+            statut_paiement__in=['non_paye', 'partiel']
+        )
+
+        total_impaye = ventes_impayees.aggregate(
+            total=Sum('montant_restant')
+        )['total'] or 0
+
+        return Response({
+            'total_paiements': paiements.aggregate(Sum('montant'))['montant__sum'] or 0,
+            'nombre_paiements': paiements.count(),
+            'par_mode_paiement': list(par_mode),
+            'par_jour': list(par_jour),
+            'impayes': {
+                'total': total_impaye,
+                'nombre_ventes': ventes_impayees.count(),
+                'ventes': VenteDetailSerializer(ventes_impayees[:20], many=True).data
+            }
+        })
+
+
 class DashboardViewSet(viewsets.ViewSet):
     permission_classes = [IsAdminOrVendeur]
 
@@ -1064,11 +898,8 @@ class DashboardViewSet(viewsets.ViewSet):
             ventes_filter = Vente.objects.filter(
                 created_by=user, statut='confirmee'
             )
-            clients_filter = Client.objects.filter(created_by=user)
-            # Un vendeur peut voir les entrepôts où il est responsable
-            entrepots_filter = Entrepot.objects.filter(
-                Q(responsable=user) | Q(created_by=user)
-            ).distinct()
+            clients_filter = Client.objects.all()  # Vendeur voit tous les clients
+            entrepots_filter = Entrepot.objects.filter(actif=True)  # Vendeur voit tous les entrepôts actifs
 
         # Statistiques générales
         total_ventes = ventes_filter.count()
@@ -1214,14 +1045,21 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def ventes(self, request):
         """Rapport détaillé des ventes"""
+        user = request.user
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         categorie_id = request.query_params.get('categorie')
         vendeur_id = request.query_params.get('vendeur')
         entrepot_id = request.query_params.get('entrepot')
 
-        # Filtrage de base
-        queryset = Vente.objects.filter(statut='confirmee')
+        # Filtrage de base selon le rôle
+        if user.role == 'admin':
+            queryset = Vente.objects.filter(statut='confirmee')
+        else:
+            queryset = Vente.objects.filter(
+                statut='confirmee',
+                created_by=user
+            )
 
         if date_debut and date_fin:
             queryset = queryset.filter(
@@ -1229,7 +1067,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 created_at__date__lte=date_fin
             )
 
-        if vendeur_id:
+        if vendeur_id and user.role == 'admin':  # Seul l'admin peut filtrer par vendeur
             queryset = queryset.filter(created_by_id=vendeur_id)
 
         if entrepot_id:
@@ -1257,18 +1095,25 @@ class RapportsViewSet(viewsets.ViewSet):
             ).aggregate(total=Sum('quantite'))['total'] or 0,
         }
 
-        # Top vendeur
-        top_vendeur = User.objects.filter(
-            vente__in=queryset
-        ).annotate(
-            total_ventes=Count('vente')
-        ).order_by('-total_ventes').first()
+        # Top vendeur (seulement pour admin)
+        if user.role == 'admin':
+            top_vendeur = User.objects.filter(
+                vente__in=queryset
+            ).annotate(
+                total_ventes=Count('vente')
+            ).order_by('-total_ventes').first()
 
-        stats['top_vendeur'] = {
-            'id': top_vendeur.id if top_vendeur else None,
-            'email': top_vendeur.email if top_vendeur else 'N/A',
-            'total_ventes': top_vendeur.total_ventes if top_vendeur else 0
-        }
+            stats['top_vendeur'] = {
+                'id': top_vendeur.id if top_vendeur else None,
+                'email': top_vendeur.email if top_vendeur else 'N/A',
+                'total_ventes': top_vendeur.total_ventes if top_vendeur else 0
+            }
+        else:
+            stats['top_vendeur'] = {
+                'id': user.id,
+                'email': user.email,
+                'total_ventes': queryset.count()
+            }
 
         # Top produit
         top_produit = Produit.objects.filter(
@@ -1351,18 +1196,27 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def clients(self, request):
         """Rapport sur les clients"""
+        user = request.user
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
 
+        # Les vendeurs voient tous les clients
         clients = Client.objects.all()
 
         clients_data = []
         for client in clients:
             # Calculer les statistiques client
-            ventes_client = Vente.objects.filter(
-                client=client,
-                statut='confirmee'
-            )
+            if user.role == 'admin':
+                ventes_client = Vente.objects.filter(
+                    client=client,
+                    statut='confirmee'
+                )
+            else:
+                ventes_client = Vente.objects.filter(
+                    client=client,
+                    statut='confirmee',
+                    created_by=user
+                )
 
             if date_debut and date_fin:
                 ventes_client = ventes_client.filter(
@@ -1391,12 +1245,19 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def mouvements_stock(self, request):
         """Rapport des mouvements de stock"""
+        user = request.user
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         entrepot_id = request.query_params.get('entrepot')
         type_mouvement = request.query_params.get('type_mouvement')
 
-        mouvements = MouvementStock.objects.all().select_related(
+        # Filtrage selon le rôle
+        if user.role == 'admin':
+            mouvements = MouvementStock.objects.all()
+        else:
+            mouvements = MouvementStock.objects.filter(created_by=user)
+
+        mouvements = mouvements.select_related(
             'produit', 'created_by', 'entrepot')
 
         if date_debut and date_fin:
@@ -1423,7 +1284,13 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def entrepots(self, request):
         """Rapport sur les entrepôts"""
-        entrepots = Entrepot.objects.all()
+        user = request.user
+        
+        # Les vendeurs voient tous les entrepôts actifs
+        if user.role == 'admin':
+            entrepots = Entrepot.objects.all()
+        else:
+            entrepots = Entrepot.objects.filter(actif=True)
 
         entrepots_data = []
         for entrepot in entrepots:
@@ -1432,10 +1299,17 @@ class RapportsViewSet(viewsets.ViewSet):
             valeur_stock = entrepot.stock_total_valeur()
 
             # Ventes depuis cet entrepôt
-            ventes_entrepot = Vente.objects.filter(
-                lignes_vente__entrepot=entrepot,
-                statut='confirmee'
-            ).distinct()
+            if user.role == 'admin':
+                ventes_entrepot = Vente.objects.filter(
+                    lignes_vente__entrepot=entrepot,
+                    statut='confirmee'
+                ).distinct()
+            else:
+                ventes_entrepot = Vente.objects.filter(
+                    lignes_vente__entrepot=entrepot,
+                    statut='confirmee',
+                    created_by=user
+                ).distinct()
 
             chiffre_affaires = ventes_entrepot.aggregate(
                 total=Sum('montant_total')
@@ -1553,9 +1427,8 @@ class StatistiquesViewSet(viewsets.ViewSet):
             'produits': data
         })
 
+
 # Vue pour les opérations de stock avancées
-
-
 class StockOperationsViewSet(viewsets.ViewSet):
     permission_classes = [IsAdmin]
 
