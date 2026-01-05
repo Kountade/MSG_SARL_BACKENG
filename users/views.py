@@ -397,9 +397,12 @@ class StockDisponibleViewSet(viewsets.ViewSet):
 
 
 # views.py - TransfertEntrepotViewSet
+
+# views.py - TransfertEntrepotViewSet
+
+
 class TransfertEntrepotViewSet(viewsets.ModelViewSet):
-    # Seuls les admins peuvent faire des transferts
-    permission_classes = [IsAdmin]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -417,7 +420,7 @@ class TransfertEntrepotViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save()
 
     @action(detail=True, methods=['post'])
     def confirmer(self, request, pk=None):
@@ -496,6 +499,7 @@ class TransfertEntrepotViewSet(viewsets.ModelViewSet):
                 {"detail": "Transfert non trouvé."},
                 status=status.HTTP_404_NOT_FOUND
             )
+# views.py - Modifiez VenteViewSet et ajoutez ces vues
 
 
 class VenteViewSet(viewsets.ModelViewSet):
