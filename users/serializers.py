@@ -368,6 +368,10 @@ class FactureSerializer(serializers.ModelSerializer):
 
 class VenteDetailSerializer(serializers.ModelSerializer):
     client_nom = serializers.CharField(source='client.nom', read_only=True)
+    client_adresse = serializers.CharField(
+        source='client.adresse', read_only=True)
+    client_telephone = serializers.CharField(
+        source='client.telephone', read_only=True)
     created_by_email = serializers.CharField(
         source='created_by.email', read_only=True)
     lignes_vente = LigneDeVenteSerializer(many=True, read_only=True)
